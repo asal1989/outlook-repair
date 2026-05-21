@@ -4,9 +4,10 @@ import os
 import platform
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, FrozenSet, List, Optional, Set
 
-OUTLOOK_EXTENSIONS: Set[str] = {'.pst', '.ost', '.lst'}
+# Immutable so callers cannot accidentally corrupt the module default
+OUTLOOK_EXTENSIONS: FrozenSet[str] = frozenset({'.pst', '.ost', '.lst'})
 
 _FILE_TYPE_NAMES = {
     '.pst': 'Personal Storage Table',

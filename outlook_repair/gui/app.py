@@ -124,7 +124,6 @@ class OutlookRepairApp:
         f = ttk.Frame(self.nb, padding=10)
         self.nb.add(f, text='  Repair  ')
 
-        # File selector
         sf = ttk.LabelFrame(f, text='Target File', padding=10)
         sf.pack(fill=tk.X, pady=(0, 8))
         self._repair_lbl = ttk.Label(sf,
@@ -132,7 +131,6 @@ class OutlookRepairApp:
         self._repair_lbl.pack(anchor='w')
         ttk.Button(sf, text='Browse…', command=self._browse_repair).pack(anchor='w', pady=(4, 0))
 
-        # Validation
         vf = ttk.LabelFrame(f, text='Validation Result', padding=10)
         vf.pack(fill=tk.X, pady=(0, 8))
         self._valid_lbl = ttk.Label(vf, text='Not validated yet.')
@@ -141,7 +139,6 @@ class OutlookRepairApp:
             vf, height=4, state=tk.DISABLED, font=('Consolas', 9), wrap=tk.WORD)
         self._valid_txt.pack(fill=tk.X, pady=(4, 0))
 
-        # Options
         of = ttk.LabelFrame(f, text='Options', padding=10)
         of.pack(fill=tk.X, pady=(0, 8))
         self._do_backup = tk.BooleanVar(value=True)
@@ -151,7 +148,6 @@ class OutlookRepairApp:
         ttk.Checkbutton(of, text='Use scanpst.exe if available (Windows)',
                         variable=self._use_scanpst).pack(anchor='w')
 
-        # Buttons
         bf = ttk.Frame(f)
         bf.pack(fill=tk.X, pady=(0, 6))
         ttk.Button(bf, text='Validate', style='Action.TButton',
@@ -171,7 +167,6 @@ class OutlookRepairApp:
         f = ttk.Frame(self.nb, padding=10)
         self.nb.add(f, text='  Recovery  ')
 
-        # Source
         sf = ttk.LabelFrame(f, text='Source PST/OST File', padding=10)
         sf.pack(fill=tk.X, pady=(0, 8))
         self._rec_src = tk.StringVar()
@@ -181,7 +176,6 @@ class OutlookRepairApp:
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         ttk.Button(row, text='Browse…', command=self._browse_rec_src).pack(side=tk.RIGHT)
 
-        # Output
         of = ttk.LabelFrame(f, text='Output Directory', padding=10)
         of.pack(fill=tk.X, pady=(0, 8))
         self._rec_out = tk.StringVar(value=str(
@@ -192,7 +186,6 @@ class OutlookRepairApp:
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         ttk.Button(row2, text='Browse…', command=self._browse_rec_out).pack(side=tk.RIGHT)
 
-        # Format
         ff = ttk.LabelFrame(f, text='Output Format', padding=10)
         ff.pack(fill=tk.X, pady=(0, 8))
         self._rec_fmt = tk.StringVar(value='eml')
@@ -201,7 +194,6 @@ class OutlookRepairApp:
                            ('txt', 'TXT  —  plain text file')]:
             ttk.Radiobutton(ff, text=label, variable=self._rec_fmt, value=val).pack(anchor='w')
 
-        # Buttons
         bf = ttk.Frame(f)
         bf.pack(fill=tk.X, pady=(0, 6))
         ttk.Button(bf, text='Start Recovery', style='Action.TButton',
@@ -284,7 +276,11 @@ class OutlookRepairApp:
             return
         from outlook_repair.core.scanner import _build_info
         from pathlib import Path
-        info = _build_info(Path(path))
+        try:
+            info = _build_info(Path(path))
+        except OSError as e:
+            messagebox.showerror('Error', f'Cannot read file info:\n{e}')
+            return
         self._add_to_tree(info)
         self._log(f'Added: {path}')
 
@@ -378,8 +374,7 @@ class OutlookRepairApp:
         self._valid_txt.insert('1.0', '\n'.join(lines))
         self._valid_txt.config(state=tk.DISABLED)
         self._update_tree_status(path, 'Valid' if ok else 'Corrupt')
-        lvl = 'success' if ok else 'error'
-        self._log(f'Validation: {r.summary}', lvl)
+        self._log(f'Validation: {r.summary}', 'success' if ok else 'error')
 
     def _do_repair(self):
         path = self._get_repair_path()
@@ -393,27 +388,38 @@ class OutlookRepairApp:
         from outlook_repair.core import backup as bkp_mod
         from outlook_repair.core.repair import repair_file
 
+        # Snapshot checkbox values on the main thread before handing off
+        do_backup = self._do_backup.get()
+        use_scanpst = self._use_scanpst.get()
+
         self._repair_btn.config(state=tk.DISABLED)
         self._repair_bar.start()
 
         def run():
             backup_path = None
-            if self._do_backup.get():
+            if do_backup:
                 try:
                     self._ui(self._repair_status.config, text='Creating backup...')
                     backup_path = bkp_mod.create_backup(path)
                     self._log(f'Backup: {backup_path}', 'success')
                 except Exception as e:
-                    self._log(f'Backup failed: {e}', 'error')
-                    if not messagebox.askyesno('Backup failed', f'{e}\n\nContinue anyway?'):
-                        self._ui(self._repair_done)
-                        return
+                    self._log(f'Backup failed: {e} — repair aborted', 'error')
+                    # Must show dialog on main thread; abort rather than ask
+                    self._ui(messagebox.showerror, 'Backup Failed',
+                             f'Could not create backup:\n{e}\n\nRepair aborted.')
+                    self._ui(self._repair_done)
+                    return
 
             def cb(msg: str):
                 self._log(msg)
                 self._ui(self._repair_status.config, text=msg[:100])
 
-            result = repair_file(path, backup_path=backup_path, progress_callback=cb)
+            result = repair_file(
+                path,
+                backup_path=backup_path,
+                progress_callback=cb,
+                use_scanpst=use_scanpst,
+            )
             self._ui(self._show_repair_result, result, path)
 
         threading.Thread(target=run, daemon=True).start()
@@ -552,7 +558,7 @@ class OutlookRepairApp:
         self._ui(do)
 
     def _ui(self, fn, *args, **kwargs):
-        """Schedule *fn* on the main thread."""
+        """Schedule *fn* on the main thread (safe to call from any thread)."""
         if threading.current_thread() is threading.main_thread():
             fn(*args, **kwargs)
         else:

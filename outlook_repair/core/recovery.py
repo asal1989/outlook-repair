@@ -3,7 +3,7 @@
 import csv
 import os
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 
 class EmailRecord:
@@ -61,8 +61,12 @@ def recover_emails(
         result['errors'].append(f'Email recovery is not supported for {ext} files')
         return result
 
-    if not _pypff_recovery(file_path, output_dir, output_format, result, log):
-        log('pypff not available — falling back to raw byte scan (partial data only)')
+    pypff_ok, pypff_count = _pypff_recovery(file_path, output_dir, output_format, result, log)
+    if not pypff_ok or pypff_count == 0:
+        if pypff_ok and pypff_count == 0:
+            log('pypff found 0 messages — trying raw byte scan as fallback')
+        else:
+            log('pypff not available — falling back to raw byte scan (partial data only)')
         _raw_recovery(file_path, output_dir, output_format, result, log)
 
     return result
@@ -75,11 +79,12 @@ def recover_emails(
 def _pypff_recovery(
     file_path: str, output_dir: str, fmt: str,
     result: Dict, log: Callable,
-) -> bool:
+) -> Tuple[bool, int]:
+    """Return (attempted, messages_found)."""
     try:
         import pypff  # type: ignore
     except ImportError:
-        return False
+        return False, 0
 
     try:
         log('Opening file with pypff...')
@@ -88,12 +93,14 @@ def _pypff_recovery(
         emails: List[EmailRecord] = []
         _walk_pypff(pff.get_root_folder(), emails, log)
         pff.close()
-        log(f'pypff found {len(emails)} message(s)')
-        _save(emails, output_dir, fmt, result, log)
-        return True
+        count = len(emails)
+        log(f'pypff found {count} message(s)')
+        if count > 0:
+            _save(emails, output_dir, fmt, result, log)
+        return True, count
     except Exception as e:
         log(f'pypff error: {e}')
-        return False
+        return False, 0
 
 
 def _walk_pypff(folder, emails: List[EmailRecord], log: Callable):
@@ -137,18 +144,24 @@ def _raw_recovery(
 ):
     log('Scanning raw bytes for email headers...')
     emails: List[EmailRecord] = []
-    chunk = 1024 * 1024
+    # Deduplicate by (subject, sender) to avoid re-adding emails from the
+    # overlap region that is carried over between chunks.
+    seen: Set[Tuple[str, str]] = set()
+    chunk_size = 1024 * 1024
+    # Overlap must be >= max lookbehind (200) + len('Subject: ') so a header
+    # spanning a chunk boundary is not missed entirely.
+    overlap = 4096
 
     try:
         fsize = os.path.getsize(file_path)
         log(f'File size: {fsize:,} bytes')
-        buf = b''
+        tail = b''
         with open(file_path, 'rb') as f:
             while True:
-                data = f.read(chunk)
+                data = f.read(chunk_size)
                 if not data:
                     break
-                buf += data
+                buf = tail + data
                 pos = 0
                 while True:
                     idx = buf.find(b'Subject: ', pos)
@@ -157,19 +170,23 @@ def _raw_recovery(
                     fragment = buf[max(0, idx - 200): idx + 2000]
                     rec = _parse_fragment(fragment)
                     if rec:
-                        emails.append(rec)
-                        log(f'Found: {rec.subject[:60]}')
+                        key = (rec.subject, rec.sender)
+                        if key not in seen:
+                            seen.add(key)
+                            emails.append(rec)
+                            log(f'Found: {rec.subject[:60]}')
                     pos = idx + 1
                     if len(emails) >= 2000:
                         break
                 if len(emails) >= 2000:
                     break
-                buf = buf[-1024:]
+                # Keep an overlap tail so headers spanning chunk boundaries are caught
+                tail = buf[-overlap:]
     except OSError as e:
         result['errors'].append(f'Read error: {e}')
         return
 
-    log(f'Raw scan complete — {len(emails)} fragment(s) found')
+    log(f'Raw scan complete — {len(emails)} unique fragment(s) found')
     _save(emails, output_dir, fmt, result, log)
 
 
@@ -229,7 +246,8 @@ def _save_csv(emails: List[EmailRecord], output_dir: str, result: Dict, log: Cal
     path = os.path.join(output_dir, 'recovered_emails.csv')
     try:
         with open(path, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=['Subject','From','To','Date','Message-ID','Body'])
+            writer = csv.DictWriter(
+                f, fieldnames=['Subject', 'From', 'To', 'Date', 'Message-ID', 'Body'])
             writer.writeheader()
             for rec in emails:
                 writer.writerow(rec.to_dict())

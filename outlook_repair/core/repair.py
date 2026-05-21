@@ -68,6 +68,7 @@ def repair_file(
     backup_path: Optional[str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     stop_event: Optional[threading.Event] = None,
+    use_scanpst: bool = True,
 ) -> RepairResult:
     result = RepairResult()
     result.backup_path = backup_path
@@ -85,13 +86,16 @@ def repair_file(
     ext = p.suffix.lower()
 
     if ext in ('.pst', '.ost'):
-        scanpst = find_scanpst()
+        scanpst = find_scanpst() if use_scanpst else None
         if scanpst:
             log(f'Found scanpst.exe: {scanpst}')
             _run_scanpst(file_path, scanpst, result, log, stop_event)
         else:
-            log('scanpst.exe not found — running built-in repair')
-            _builtin_pst_repair(file_path, result, log, stop_event)
+            if use_scanpst:
+                log('scanpst.exe not found — running built-in repair')
+            else:
+                log('scanpst.exe disabled — running built-in repair')
+            _builtin_pst_repair(file_path, result, log)
     elif ext == '.lst':
         _repair_lst(file_path, result, log)
     else:
@@ -140,12 +144,7 @@ def _run_scanpst(
         result.errors.append(f'Failed to launch scanpst.exe: {e}')
 
 
-def _builtin_pst_repair(
-    file_path: str,
-    result: RepairResult,
-    log: Callable,
-    stop_event: Optional[threading.Event],
-):
+def _builtin_pst_repair(file_path: str, result: RepairResult, log: Callable):
     """Minimal built-in repair: restore magic bytes if corrupted."""
     result.method = 'built-in'
     log('Running built-in PST/OST repair...')
