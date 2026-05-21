@@ -1,0 +1,3 @@
+# No required third-party dependencies — uses Python standard library only.
+# Optional: install pypff for full PST/OST email recovery
+# pypff
