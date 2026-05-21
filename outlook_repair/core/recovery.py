@@ -122,7 +122,9 @@ def _walk_pypff(folder, emails: List[EmailRecord], log: Callable):
                             rec.body = val
                     except Exception:
                         pass
-                emails.append(rec)
+                # Only keep records that have at least a subject or sender
+                if rec.subject or rec.sender:
+                    emails.append(rec)
             except Exception:
                 pass
         for i in range(folder.number_of_sub_folders):
@@ -144,12 +146,8 @@ def _raw_recovery(
 ):
     log('Scanning raw bytes for email headers...')
     emails: List[EmailRecord] = []
-    # Deduplicate by (subject, sender) to avoid re-adding emails from the
-    # overlap region that is carried over between chunks.
     seen: Set[Tuple[str, str]] = set()
     chunk_size = 1024 * 1024
-    # Overlap must be >= max lookbehind (200) + len('Subject: ') so a header
-    # spanning a chunk boundary is not missed entirely.
     overlap = 4096
 
     try:
@@ -180,7 +178,6 @@ def _raw_recovery(
                         break
                 if len(emails) >= 2000:
                     break
-                # Keep an overlap tail so headers spanning chunk boundaries are caught
                 tail = buf[-overlap:]
     except OSError as e:
         result['errors'].append(f'Read error: {e}')
@@ -196,13 +193,15 @@ def _parse_fragment(data: bytes) -> Optional[EmailRecord]:
         rec = EmailRecord()
         for line in text.splitlines():
             low = line.lower()
-            if low.startswith('subject:'):
+            # Use first occurrence of each field (guards against garbage
+            # repeated headers overwriting valid data with last-wins).
+            if not rec.subject and low.startswith('subject:'):
                 rec.subject = line[8:].strip()
-            elif low.startswith('from:'):
+            elif not rec.sender and low.startswith('from:'):
                 rec.sender = line[5:].strip()
-            elif low.startswith('to:'):
+            elif not rec.recipients and low.startswith('to:'):
                 rec.recipients = line[3:].strip()
-            elif low.startswith('date:'):
+            elif not rec.date and low.startswith('date:'):
                 rec.date = line[5:].strip()
         return rec if rec.subject else None
     except Exception:

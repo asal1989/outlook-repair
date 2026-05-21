@@ -18,6 +18,7 @@ class OutlookRepairApp:
         self.found_files: List[Dict] = []
         self.selected_file: Optional[Dict] = None
         self._stop_event = threading.Event()
+        self._active_scans = 0   # guard against concurrent scan threads
         self._setup_window()
         self._setup_styles()
         self._build_ui()
@@ -78,13 +79,22 @@ class OutlookRepairApp:
 
         ctrl = ttk.Frame(f)
         ctrl.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(ctrl, text='Scan System', style='Action.TButton',
-                   command=self._scan_system).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(ctrl, text='Add Folder…', command=self._add_folder).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(ctrl, text='Add File…', command=self._add_file_manually).pack(side=tk.LEFT, padx=(0, 4))
+
+        self._scan_system_btn = ttk.Button(
+            ctrl, text='Scan System', style='Action.TButton', command=self._scan_system)
+        self._scan_system_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._add_folder_btn = ttk.Button(
+            ctrl, text='Add Folder…', command=self._add_folder)
+        self._add_folder_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Button(ctrl, text='Add File…', command=self._add_file_manually).pack(
+            side=tk.LEFT, padx=(0, 4))
         ttk.Button(ctrl, text='Clear', command=self._clear_list).pack(side=tk.LEFT, padx=(0, 4))
+
         self._stop_btn = ttk.Button(ctrl, text='Stop', command=self._stop_scan, state=tk.DISABLED)
         self._stop_btn.pack(side=tk.LEFT)
+
         ttk.Button(ctrl, text='Use Selected →', style='Action.TButton',
                    command=self._use_selected).pack(side=tk.RIGHT)
 
@@ -196,8 +206,9 @@ class OutlookRepairApp:
 
         bf = ttk.Frame(f)
         bf.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(bf, text='Start Recovery', style='Action.TButton',
-                   command=self._start_recovery).pack(side=tk.LEFT, padx=(0, 6))
+        self._rec_start_btn = ttk.Button(
+            bf, text='Start Recovery', style='Action.TButton', command=self._start_recovery)
+        self._rec_start_btn.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(bf, text='Open Output Folder',
                    command=self._open_out_folder).pack(side=tk.LEFT)
 
@@ -235,11 +246,18 @@ class OutlookRepairApp:
     # Scanner handlers
     # ------------------------------------------------------------------
 
+    def _set_scan_buttons(self, enabled: bool):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self._scan_system_btn.config(state=state)
+        self._add_folder_btn.config(state=state)
+        self._stop_btn.config(state=tk.DISABLED if enabled else tk.NORMAL)
+
     def _scan_system(self):
         from outlook_repair.core.scanner import get_default_scan_paths, scan_directory
         self._stop_event.clear()
+        self._active_scans += 1
+        self._set_scan_buttons(enabled=False)
         self._scan_bar.start()
-        self._stop_btn.config(state=tk.NORMAL)
         paths = get_default_scan_paths()
         self._log(f'Scanning {len(paths)} default path(s)...')
 
@@ -259,6 +277,8 @@ class OutlookRepairApp:
             return
         from outlook_repair.core.scanner import scan_directory
         self._stop_event.clear()
+        self._active_scans += 1
+        self._set_scan_buttons(enabled=False)
         self._scan_bar.start()
         self._log(f'Scanning: {folder}')
 
@@ -291,7 +311,7 @@ class OutlookRepairApp:
 
     def _stop_scan(self):
         self._stop_event.set()
-        self._stop_btn.config(state=tk.DISABLED)
+        self._log('Stopping scan...')
 
     def _use_selected(self):
         sel = self.tree.selection()
@@ -320,8 +340,11 @@ class OutlookRepairApp:
         self._status_lbl.config(text=f'{len(self.found_files)} file(s) found')
 
     def _finish_scan(self):
+        self._active_scans -= 1
+        if self._active_scans > 0:
+            return  # another scan thread still running
         self._scan_bar.stop()
-        self._stop_btn.config(state=tk.DISABLED)
+        self._set_scan_buttons(enabled=True)
         n = len(self.found_files)
         self._scan_lbl.config(text=f'Done — {n} file(s) found')
         self._log(f'Scan complete: {n} file(s)', 'success')
@@ -378,9 +401,12 @@ class OutlookRepairApp:
 
     def _do_repair(self):
         path = self._get_repair_path()
-        if not path or not os.path.isfile(path):
+        if not path:  # warning already shown by _get_repair_path
+            return
+        if not os.path.isfile(path):
             messagebox.showerror('Not found', f'File not found:\n{path}')
             return
+
         backup_note = 'A backup will be created.' if self._do_backup.get() else 'NO backup will be created.'
         if not messagebox.askyesno('Confirm', f'Repair:\n{path}\n\n{backup_note}'):
             return
@@ -404,7 +430,6 @@ class OutlookRepairApp:
                     self._log(f'Backup: {backup_path}', 'success')
                 except Exception as e:
                     self._log(f'Backup failed: {e} — repair aborted', 'error')
-                    # Must show dialog on main thread; abort rather than ask
                     self._ui(messagebox.showerror, 'Backup Failed',
                              f'Could not create backup:\n{e}\n\nRepair aborted.')
                     self._ui(self._repair_done)
@@ -470,6 +495,7 @@ class OutlookRepairApp:
             return
 
         from outlook_repair.core.recovery import recover_emails
+        self._rec_start_btn.config(state=tk.DISABLED)  # prevent concurrent recovery
         self._rec_bar.start()
         self._log(f'Recovery started: {src} → {fmt.upper()} in {out}')
 
@@ -486,6 +512,7 @@ class OutlookRepairApp:
 
     def _show_recovery_result(self, result: Dict):
         self._rec_bar.stop()
+        self._rec_start_btn.config(state=tk.NORMAL)
         n, fail = result['recovered'], result['failed']
         self._rec_status.config(text=f'Done — {n} recovered, {fail} failed')
         if n > 0:
